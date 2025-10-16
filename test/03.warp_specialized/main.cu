@@ -13,10 +13,10 @@
 
 int TILE_NUM = 1;  // 默认值，可通过命令行参数修改
 
-constexpr int STAGES = 3;
+constexpr int STAGES = 4;
 constexpr int NUM_SMS = 1;
 constexpr int WARPGROUP_SIZE = 128;
-constexpr int WARPGROUPS = 2;
+constexpr int WARPGROUPS = 4;
 constexpr int NUM_THREADS = WARPGROUPS * WARPGROUP_SIZE;
 
 struct SharedStorage {
@@ -44,7 +44,7 @@ __global__ __launch_bounds__(NUM_THREADS) void ws_kernel(
     if(tid == 0){
         for(int i = 0; i < STAGES; i++){
             mbarrier_init(pro_bar[i], 1);
-            mbarrier_init(con_bar[i], WARPGROUPS-1);
+            mbarrier_init(con_bar[i], 1);
         }
     }
     fence_proxy_async_shared();
@@ -75,15 +75,16 @@ __global__ __launch_bounds__(NUM_THREADS) void ws_kernel(
     } else {
         // 消费者，计算，寄存器累加
         // setmaxnreg_inc<232>();
+        int con_wgid = wgid - 1;
         float C[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-        int stage = 0;
+        int stage = con_wgid;
         int phase = 0;
         if(wg_tid == 0){
-            for(int i = 0; i < STAGES; i++){
+            for(int i = con_wgid; i < STAGES; i += WARPGROUPS - 1){
                 mbarrier_arrive(con_bar[i], 1);
             }
         }
-        for(int bid = blockIdx.x; bid < tile_num; bid += gridDim.x){
+        for(int bid = blockIdx.x * (WARPGROUPS - 1) + con_wgid; bid < tile_num; bid += gridDim.x * (WARPGROUPS - 1)){
             // 主循环
             mbarrier_wait(pro_bar[stage], phase);
             // wgmma
@@ -100,9 +101,9 @@ __global__ __launch_bounds__(NUM_THREADS) void ws_kernel(
             if(wg_tid == 0){
                 mbarrier_arrive(con_bar[stage], 1);
             }
-            stage++;
-            if(stage == STAGES){
-                stage = 0;
+            stage += WARPGROUPS - 1;
+            if(stage >= STAGES){
+                stage -= STAGES;
                 phase ^= 1;
             }
         }
@@ -110,10 +111,10 @@ __global__ __launch_bounds__(NUM_THREADS) void ws_kernel(
         uint32_t row_group = (wg_tid >> 5) << 4;
         uint32_t row_in_group = (wg_tid & 31) >> 2;
         uint32_t col_group = wg_tid & 3;
-        d_C[(row_group + row_in_group) * 8 + (col_group << 1)] = C[0];
-        d_C[(row_group + row_in_group) * 8 + (col_group << 1) + 1] = C[1];
-        d_C[(row_group + row_in_group + 8) * 8 + (col_group << 1)] = C[2];
-        d_C[(row_group + row_in_group + 8) * 8 + (col_group << 1) + 1] = C[3];
+        atomicAdd(&d_C[(row_group + row_in_group) * 8 + (col_group << 1)], C[0]);
+        atomicAdd(&d_C[(row_group + row_in_group) * 8 + (col_group << 1) + 1], C[1]);
+        atomicAdd(&d_C[(row_group + row_in_group + 8) * 8 + (col_group << 1)], C[2]);
+        atomicAdd(&d_C[(row_group + row_in_group + 8) * 8 + (col_group << 1) + 1], C[3]);
     }
 }
 
@@ -278,18 +279,4 @@ int main(int argc, char* argv[]) {
     free(h_C);
     return 0;
 }
-/*
-A 矩阵初始值：
-0 1 2 3 4 5 6 7
-8 9 10 11 12 13 14 15
-16 17 18 19 20 21 22 23
-24 25 26 27 28 29 30 31
-32 33 34 35 36 37 38 39
-40 41 42 43 44 45 46 47
-48 49 50 51 52 53 54 55
-56 57 58 59 60 61 62 63
-...
-
-
-*/
 
