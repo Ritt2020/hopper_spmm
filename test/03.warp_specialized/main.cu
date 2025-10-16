@@ -16,7 +16,7 @@ int TILE_NUM = 1;  // 默认值，可通过命令行参数修改
 constexpr int STAGES = 3;
 constexpr int NUM_SMS = 1;
 constexpr int WARPGROUP_SIZE = 128;
-constexpr int WARPGROUPS = 3;
+constexpr int WARPGROUPS = 2;
 constexpr int NUM_THREADS = WARPGROUPS * WARPGROUP_SIZE;
 
 struct SharedStorage {
@@ -228,10 +228,16 @@ int main(int argc, char* argv[]) {
     */
     float *h_A = (float *)malloc(TILE_M * TILE_K * TILE_NUM * sizeof(float));
     float *h_B = (float *)malloc(TILE_K * TILE_NUM * TILE_N * sizeof(float));
-    fill_matrix_random(h_A, TILE_M * TILE_K * TILE_NUM);
-    fill_matrix_random(h_B, TILE_K * TILE_NUM * TILE_N);
+    
+    // 随机初始化A矩阵和B矩阵，值在0到1之间
+    srand(42); // 固定种子，方便复现
+    for(int i = 0; i < TILE_M * TILE_K * TILE_NUM; i++){
+        h_A[i] = (float)rand() / (float)RAND_MAX;
+    }
+    for(int i = 0; i < TILE_K * TILE_NUM * TILE_N; i++) {
+        h_B[i] = (float)rand() / (float)RAND_MAX;
+    }
     // 拷贝到 GPU
-    printf("随机生成数据\n");
     float *d_A = nullptr;
     float *d_B = nullptr;
     float *d_C = nullptr;
@@ -240,18 +246,20 @@ int main(int argc, char* argv[]) {
     CHECK_CUDA(cudaMemcpy(d_A, h_A, TILE_M * TILE_K * TILE_NUM * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_B, h_B, TILE_K * TILE_NUM * TILE_N * sizeof(float), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMalloc(&d_C, TILE_M * TILE_N * sizeof(float)));
-    printf("创建 tensor map\n");
     // 创建 tensor map
     CUtensorMap tensorMapA = create_tma_desc_A(d_A);
     CUtensorMap tensorMapB = create_tma_desc_B(d_B);
     // 计算shared memory 大小
     size_t shared_mem_size = sizeof(SharedStorage);
     // 执行 kernel
-    printf("执行 kernel\n");
     ws_kernel<<<NUM_SMS, NUM_THREADS, shared_mem_size>>>(tensorMapA, tensorMapB, d_C, TILE_NUM);
     CHECK_CUDA(cudaGetLastError());
     CHECK_CUDA(cudaDeviceSynchronize());
-    printf("kernel 执行完成\n");
+    
+    // 将结果拷贝回主机并打印用于调试
+    float *h_C = (float *)malloc(TILE_M * TILE_N * sizeof(float));
+    CHECK_CUDA(cudaMemcpy(h_C, d_C, TILE_M * TILE_N * sizeof(float), cudaMemcpyDeviceToHost));
+    
     // 结果验证
     bool result_correct = verify_result(d_C, h_A, h_B, TILE_M, TILE_N, TILE_K, TILE_NUM);
     if(!result_correct) {
@@ -267,7 +275,21 @@ int main(int argc, char* argv[]) {
     CHECK_CUDA(cudaFree(d_C));
     free(h_A);
     free(h_B);
+    free(h_C);
     return 0;
 }
+/*
+A 矩阵初始值：
+0 1 2 3 4 5 6 7
+8 9 10 11 12 13 14 15
+16 17 18 19 20 21 22 23
+24 25 26 27 28 29 30 31
+32 33 34 35 36 37 38 39
+40 41 42 43 44 45 46 47
+48 49 50 51 52 53 54 55
+56 57 58 59 60 61 62 63
+...
 
+
+*/
 

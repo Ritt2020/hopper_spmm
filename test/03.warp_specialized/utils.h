@@ -38,25 +38,16 @@ bool verify_result(float *d_C, float *h_A, float *h_B, int tile_m, int tile_n, i
     float *h_C_ref = (float*)calloc(tile_m * tile_n, sizeof(float));
     
     // 累加TILE_NUM个矩阵块的乘积
-    // 对于每个tile: C += A_tile * B_tile
-    // A_tile: tile_m x tile_k (行主序)
-    // B_tile: tile_k x tile_n (列主序)
-    for(int tile_idx = 0; tile_idx < tile_num; tile_idx++) {
-        // 获取当前tile在A和B中的起始位置
-        float *A_tile = h_A + tile_idx * tile_m * tile_k;
-        float *B_tile = h_B + tile_idx * tile_k * tile_n;
-        
-        // 计算当前tile的矩阵乘法并累加到C
-        for(int i = 0; i < tile_m; i++) {
-            for(int j = 0; j < tile_n; j++) {
-                for(int k = 0; k < tile_k; k++) {
-                    // A_tile[i][k] = A_tile[i * tile_k + k] (行主序)
-                    // B_tile[k][j] = B_tile[j * tile_k + k] (列主序)
-                    h_C_ref[i * tile_n + j] += A_tile[i * tile_k + k] * B_tile[j * tile_k + k];
+    for(int i = 0; i < tile_num; i++){
+        for(int r = 0; r < tile_m; r++){
+            for(int c = 0; c < tile_n; c++){
+                for(int k = 0; k < tile_k; k++){
+                    h_C_ref[r * tile_n + c] += h_A[r * tile_k * tile_num + k + i * tile_k] * h_B[c * tile_k * tile_num + k + i * tile_k];
                 }
             }
         }
     }
+    
     
     // 计算相对误差
     double max_error = 0.0;
@@ -103,19 +94,6 @@ bool verify_result(float *d_C, float *h_A, float *h_B, int tile_m, int tile_n, i
     if(error_count > max_error_print) {
         printf("... 还有 %d 个位置存在误差（未全部显示）\n", error_count - max_error_print);
     }
-    
-    // 输出统计信息
-    printf("\n=== 验证统计 ===\n");
-    printf("验证结果: %s\n", passed ? "✓ 通过" : "✗ 失败");
-    printf("矩阵维度: C[%d,%d] = sum(A_i[%d,%d] * B_i[%d,%d]) for i=0..%d\n", 
-           tile_m, tile_n, tile_m, tile_k, tile_k, tile_n, tile_num-1);
-    printf("最大绝对误差: %.6e\n", max_error);
-    printf("最大参考值: %.6e\n", max_ref);
-    if(max_ref > 1e-6) {
-        printf("最大相对误差: %.6e (%.4f%%)\n", max_error / max_ref, (max_error / max_ref) * 100);
-    }
-    printf("相对误差阈值: %.6e (%.4f%%)\n", relative_tolerance, relative_tolerance * 100);
-    printf("错误数量: %d / %d\n", error_count, tile_m * tile_n);
     
     // 清理内存
     free(h_C);
