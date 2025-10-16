@@ -19,13 +19,7 @@ void checkCudaErrors(cudaError_t error, const char* file, int line) {
   }
   
   #define CHECK_CUDA(err) checkCudaErrors(err, __FILE__, __LINE__)
-
-inline void fill_matrix_random(float* ptr, int n) {
-    for(int i = 0; i < n; ++i) {
-        ptr[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
-    }
-}
-
+  
 // 验证函数：计算TILE_NUM个矩阵块乘法的累加结果
 // tile_m: 每个tile的M维度, tile_n: 每个tile的N维度, tile_k: 每个tile的K维度
 // tile_num: tile的数量
