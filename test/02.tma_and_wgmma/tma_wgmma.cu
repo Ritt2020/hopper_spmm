@@ -194,7 +194,7 @@ __global__ void tma_wgmma_kernel(
     // 等待完成
     ptx::mbarrier_arrive_and_wait(mbarrier);
     __syncthreads();
-    ptx::fence_proxy_async_shared();
+    // ptx::fence_proxy_async_shared();
     // 转换 tf32
     ptx::convert_fp32_to_tf32_shared(reinterpret_cast<uint32_t const*>(sA), TILE_M * TILE_K);
     ptx::convert_fp32_to_tf32_shared(reinterpret_cast<uint32_t const*>(sB), TILE_N * TILE_K);
