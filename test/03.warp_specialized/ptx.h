@@ -1,23 +1,33 @@
 #pragma once
 #define DEVICE __device__ __forceinline__
 
-DEVICE uint32_t encode(uint32_t x){
+#if defined(USE_BF16)
+    #define MAT_VAL_TYPE bf16
+#else
+    #define MAT_VAL_TYPE float
+#endif
+
+#define u32 uint32_t
+#define u64 uint64_t
+#define i32 int32_t
+
+DEVICE u32 encode(u32 x){
     return (x & 0x3FFFF) >> 4;
 }
 // 指针转换
-DEVICE uint32_t cast_smem_ptr_to_uint(void const *const ptr) {
-    return static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
+DEVICE u32 cast_smem_ptr_to_uint(void const *const ptr) {
+    return static_cast<u32>(__cvta_generic_to_shared(ptr));
 }
 // mbarrier 初始化函数
-DEVICE void mbarrier_init(uint64_t &barrier, int32_t count) {
+DEVICE void mbarrier_init(u64 &barrier, i32 count) {
     auto smem_addr = cast_smem_ptr_to_uint(&barrier);
     asm volatile("{\n\t"
                 "mbarrier.init.shared::cta.b64 [%0], %1;\n"
                 "\t}" ::"r"(smem_addr),
                 "r"(count));
 }
-DEVICE void mbarrier_wait(uint64_t& barrier, int phase) {
-    uint32_t smem_addr = cast_smem_ptr_to_uint(&barrier);
+DEVICE void mbarrier_wait(u64& barrier, i32 phase) {
+    u32 smem_addr = cast_smem_ptr_to_uint(&barrier);
     asm volatile(
         "{\n"
         ".reg .pred P1;\n"
@@ -30,16 +40,16 @@ DEVICE void mbarrier_wait(uint64_t& barrier, int phase) {
         "r"(phase));
   }
 // mbarrier arrive 函数
-DEVICE void mbarrier_arrive(uint64_t &barrier) {
-    uint32_t smem_addr = cast_smem_ptr_to_uint(&barrier);
+DEVICE void mbarrier_arrive(u64 &barrier) {
+    u32 smem_addr = cast_smem_ptr_to_uint(&barrier);
     asm volatile("{\n\t"
                     "mbarrier.arrive.shared::cta.b64 _, [%0];\n"
                     "\t}"
                     :: "r"(smem_addr));
 }
 // mbarrier arrive 函数 有 count
-DEVICE void mbarrier_arrive(uint64_t &barrier, int count) {
-    uint32_t smem_addr = cast_smem_ptr_to_uint(&barrier);
+DEVICE void mbarrier_arrive(u64 &barrier, i32 count) {
+    u32 smem_addr = cast_smem_ptr_to_uint(&barrier);
     asm volatile(
         "mbarrier.arrive.release.cta.shared::cta.b64 _, [%0], %1;\n" 
         ::"r"(smem_addr), "r"(count)
@@ -47,8 +57,8 @@ DEVICE void mbarrier_arrive(uint64_t &barrier, int count) {
 }
 
 // mbarrier arrive and wait 函数
-DEVICE void mbarrier_arrive_and_wait(uint64_t &barrier) {
-    uint32_t smem_addr = cast_smem_ptr_to_uint(&barrier);
+DEVICE void mbarrier_arrive_and_wait(u64 &barrier) {
+    u32 smem_addr = cast_smem_ptr_to_uint(&barrier);
     asm volatile("{\n\t"
                 ".reg .b64 phase;\n\t"
                 ".reg .pred p;\n\t"
@@ -63,8 +73,8 @@ DEVICE void mbarrier_arrive_and_wait(uint64_t &barrier) {
                 : "r"(smem_addr));
 }
 // 设置 mbarrier 期望的传输字节数
-DEVICE void mbarrier_expect_tx(uint64_t &barrier, uint32_t bytes) {
-    uint32_t smem_addr = cast_smem_ptr_to_uint(&barrier);
+DEVICE void mbarrier_expect_tx(u64 &barrier, u32 bytes) {
+    u32 smem_addr = cast_smem_ptr_to_uint(&barrier);
     asm volatile(
         "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" 
         ::"r"(smem_addr),
@@ -73,15 +83,15 @@ DEVICE void mbarrier_expect_tx(uint64_t &barrier, uint32_t bytes) {
 }
 // 2D TMA
 DEVICE void tma_cp_async_bulk_2d_shared_global_tile_mbarrier_bytes(
-    float* smem_dst,
+    MAT_VAL_TYPE* smem_dst,
     void const* const src_tma_desc,
-    int32_t tile_coord_i,
-    int32_t tile_coord_j,
-    uint64_t &mbarrier)
+    i32 tile_coord_i,
+    i32 tile_coord_j,
+    u64 &mbarrier)
 {
-    uint64_t tma_ptr = reinterpret_cast<uint64_t>(src_tma_desc);
-    uint32_t smem_addr = cast_smem_ptr_to_uint(smem_dst);
-    uint32_t mbar_addr = cast_smem_ptr_to_uint(&mbarrier);
+    u64 tma_ptr = reinterpret_cast<u64>(src_tma_desc);
+    u32 smem_addr = cast_smem_ptr_to_uint(smem_dst);
+    u32 mbar_addr = cast_smem_ptr_to_uint(&mbarrier);
     asm volatile(
         "cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes"
         " [%0], [%1, {%2, %3}], [%4];"
@@ -95,16 +105,16 @@ DEVICE void tma_cp_async_bulk_2d_shared_global_tile_mbarrier_bytes(
 }
 // copy 3D TMA
 DEVICE void tma_cp_async_bulk_3d_shared_global_tile_mbarrier_bytes(
-    float* smem_dst,
+    MAT_VAL_TYPE* smem_dst,
     void const* const src_tma_desc,
-    int32_t tile_coord_i,
-    int32_t tile_coord_j,
-    int32_t tile_coord_k,
-    uint64_t &mbarrier)
+    i32 tile_coord_i,
+    i32 tile_coord_j,
+    i32 tile_coord_k,
+    u64 &mbarrier)
 {
-    uint64_t tma_ptr = reinterpret_cast<uint64_t>(src_tma_desc);
-    uint32_t smem_addr = cast_smem_ptr_to_uint(smem_dst);
-    uint32_t mbar_addr = cast_smem_ptr_to_uint(&mbarrier);
+    u64 tma_ptr = reinterpret_cast<u64>(src_tma_desc);
+    u32 smem_addr = cast_smem_ptr_to_uint(smem_dst);
+    u32 mbar_addr = cast_smem_ptr_to_uint(&mbarrier);
     asm volatile(
         "cp.async.bulk.tensor.3d.shared::cluster.global.tile.mbarrier::complete_tx::bytes"
         " [%0], [%1, {%2, %3, %4}], [%5];"
@@ -118,11 +128,11 @@ DEVICE void tma_cp_async_bulk_3d_shared_global_tile_mbarrier_bytes(
     );
 }
 // 创建 wgmma 描述符，没有 swizzle
-DEVICE uint64_t create_wgmma_descriptor_no_swizzle(float *ptr, uint32_t lbo, uint32_t sbo){
+DEVICE u64 create_wgmma_descriptor_no_swizzle(MAT_VAL_TYPE *ptr, u32 lbo, u32 sbo){
     uint64_t desc = 0;
-    desc |= (uint64_t)encode(lbo) << 16;
-    desc |= (uint64_t)encode(sbo) << 32;
-    desc |= (uint64_t)encode(__cvta_generic_to_shared(ptr));
+    desc |= (u64)encode(lbo) << 16;
+    desc |= (u64)encode(sbo) << 32;
+    desc |= (u64)encode(__cvta_generic_to_shared(ptr));
     return desc;
 }
 // wgmma fence 函数
@@ -142,6 +152,7 @@ DEVICE void wgmma_wait_group() {
 DEVICE void fence_proxy_async_shared() {
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
 }
+#if not defined(USE_BF16)
 // convert fp32 to tf32 函数，shared memory
 DEVICE void convert_fp32_to_tf32_shared(uint32_t const *A, uint32_t num){
     for(int i = threadIdx.x; i < num; i += blockDim.x){
@@ -164,13 +175,14 @@ DEVICE void wgmma_tf32_m64n8k8_no_trans_ss(float *d_A, float *d_B, float *d_C){
                 :"l"(desc_a), "l"(desc_b)
             );
 }
+#endif
 
-template <uint32_t REGS>
+template <u32 REGS>
 DEVICE void setmaxnreg_inc() {
   asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" : : "n"(REGS));
 }
 
-template <uint32_t REGS>
+template <u32 REGS>
 DEVICE void setmaxnreg_dec() {
   asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" : : "n"(REGS));
 }

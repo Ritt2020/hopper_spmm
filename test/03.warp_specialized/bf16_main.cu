@@ -7,9 +7,12 @@
 #include "utils.h"
 #include "ptx.h"
 
+#define USE_BF16
+#define bf16 __nv_bfloat16
+
 #define TILE_M 64
 #define TILE_N 8
-#define TILE_K 8
+#define TILE_K 16
 
 int TILE_NUM = 1;  // 默认值，可通过命令行参数修改
 
@@ -94,7 +97,7 @@ __global__ __launch_bounds__(NUM_THREADS) void ws_kernel(
             convert_fp32_to_tf32_shared(reinterpret_cast<uint32_t const*>(&smem.B[stage * TILE_K * TILE_N]), TILE_K * TILE_N);
             // wgmma
             fence_proxy_async_shared();
-
+            wgmma_tf32_m64n8k8_no_trans_ss(&smem.A[stage * TILE_M * TILE_K], &smem.B[stage * TILE_K * TILE_N], C);
             wgmma_commit_group();
             wgmma_wait_group();
             // arrive at consumer barrier
