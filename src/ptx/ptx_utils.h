@@ -23,6 +23,7 @@ DEVICE void fence_proxy_async_shared() {
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
 }
 
+#ifdef USE_TF32
 /*
 * @brief: 将 fp32 转换为 tf32，shared memory
 * @param: A: 原始 fp32 指针
@@ -34,6 +35,7 @@ DEVICE void convert_fp32_to_tf32_shared(uint32_t const *A, uint32_t num){
             :: "r"(A[i]));
     }
 }
+#endif
 
 /*
 * @brief: 限制寄存器使用，增加寄存器数量

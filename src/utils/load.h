@@ -16,6 +16,120 @@
 COO_MTX *global_coo_mtx = NULL;
 
 /*
+* @brief: 验证CSR格式是否正确转换自COO格式
+* @author: Haoyu Wang
+* @date: 2025-10-23
+*/
+int validate_csr_from_coo(const CSR_MTX *csr, const COO_MTX *coo) {
+    if (csr == NULL || coo == NULL) {
+        printf("错误：CSR或COO矩阵指针为空\n");
+        return 0;
+    }
+    
+    if (csr->rows != coo->rows || csr->cols != coo->cols || csr->nnzs != coo->nnzs) {
+        printf("错误：CSR和COO矩阵维度不匹配\n");
+        printf("CSR: %u x %u, %u 个非零元素\n", csr->rows, csr->cols, csr->nnzs);
+        printf("COO: %u x %u, %u 个非零元素\n", coo->rows, coo->cols, coo->nnzs);
+        return 0;
+    }
+    
+    printf("开始验证CSR格式转换的正确性...\n");
+    printf("矩阵大小: %u x %u, 非零元素: %u\n", csr->rows, csr->cols, csr->nnzs);
+    
+    // 使用更高效的验证方法：检查CSR的row_ptr是否正确
+    int validation_errors = 0;
+    
+    // 1. 验证row_ptr数组的正确性
+    printf("验证row_ptr数组...\n");
+    if (csr->row_ptr[0] != 0) {
+        printf("错误：row_ptr[0] 应该为0，实际为 %u\n", csr->row_ptr[0]);
+        validation_errors++;
+    }
+    
+    if (csr->row_ptr[csr->rows] != csr->nnzs) {
+        printf("错误：row_ptr[%u] 应该为 %u，实际为 %u\n", 
+               csr->rows, csr->nnzs, csr->row_ptr[csr->rows]);
+        validation_errors++;
+    }
+    
+    // 检查row_ptr是否单调递增
+    for (vint i = 0; i < csr->rows; i++) {
+        if (csr->row_ptr[i] > csr->row_ptr[i + 1]) {
+            printf("错误：row_ptr[%u] = %u > row_ptr[%u] = %u\n", 
+                   i, csr->row_ptr[i], i + 1, csr->row_ptr[i + 1]);
+            validation_errors++;
+        }
+    }
+    
+    // 2. 验证每行的列索引是否在有效范围内
+    printf("验证列索引范围...\n");
+    for (vint row = 0; row < csr->rows; row++) {
+        for (vint idx = csr->row_ptr[row]; idx < csr->row_ptr[row + 1]; idx++) {
+            if (csr->col_idx[idx] >= csr->cols) {
+                printf("错误：行 %u 的列索引 %u 超出范围 [0, %u)\n", 
+                       row, csr->col_idx[idx], csr->cols);
+                validation_errors++;
+            }
+        }
+    }
+    
+    // 3. 抽样验证：只验证前1000个元素（对于大矩阵）
+    printf("抽样验证元素匹配...\n");
+    vint sample_size = (csr->nnzs > 1000) ? 1000 : csr->nnzs;
+    vint step = csr->nnzs / sample_size;
+    int sample_errors = 0;
+    
+    for (vint i = 0; i < sample_size; i++) {
+        vint csr_idx = i * step;
+        if (csr_idx >= csr->nnzs) break;
+        
+        // 找到CSR元素对应的行列
+        vint row = 0;
+        while (row < csr->rows && csr->row_ptr[row + 1] <= csr_idx) {
+            row++;
+        }
+        vint col = csr->col_idx[csr_idx];
+        MAT_VAL_TYPE val = csr->values[csr_idx];
+        
+        // 在COO中查找对应元素
+        int found = 0;
+        for (vint coo_idx = 0; coo_idx < coo->nnzs; coo_idx++) {
+            if (coo->row_idx[coo_idx] == row && coo->col_idx[coo_idx] == col) {
+                if (coo->values[coo_idx] == val) {
+                    found = 1;
+                    break;
+                } else {
+                    printf("错误：位置(%u, %u)的值不匹配\n", 
+                           row, col);
+                    sample_errors++;
+                    found = 1;
+                    break;
+                }
+            }
+        }
+        
+        if (!found) {
+            printf("错误：CSR中的元素(%u, %u) 在COO中未找到\n", row, col);
+            sample_errors++;
+        }
+    }
+    
+    validation_errors += sample_errors;
+    
+    if (validation_errors == 0) {
+        printf("验证成功：CSR格式转换正确！\n");
+        printf("抽样验证了 %u 个元素，全部匹配\n", sample_size);
+        return 1;
+    } else {
+        printf("验证失败：发现 %d 个错误\n", validation_errors);
+        if (sample_errors > 0) {
+            printf("其中抽样验证发现 %d 个错误\n", sample_errors);
+        }
+        return 0;
+    }
+}
+
+/*
 * @brief: 比较函数用于排序COO格式数据
 * @author: Haoyu Wang
 * @date: 2025-10-23
@@ -100,13 +214,17 @@ CSR_MTX load_matrix(const char *filename, int enable_validation) {
     // 读取数据行
     while (fgets(line, sizeof(line), file) && coo_count < nnzs) {
         vint row, col;
-        MAT_VAL_TYPE val;
+        float val_f;
         
-        if (sscanf(line, "%u %u %f", &row, &col, &val) == 3) {
+        if (sscanf(line, "%u %u %f", &row, &col, &val_f) == 3) {
             // MTX格式通常使用1-based索引，转换为0-based
             coo_mtx.row_idx[coo_count] = row - 1;
             coo_mtx.col_idx[coo_count] = col - 1;
-            coo_mtx.values[coo_count] = val;
+            #if defined(USE_BF16) || defined(USE_TF32)
+            coo_mtx.values[coo_count] = val_f;
+            #elif defined(USE_FP16)
+            coo_mtx.values[coo_count] = __float2half(val_f);
+            #endif
             coo_count++;
         }
     }
@@ -234,120 +352,6 @@ void free_csr_matrix(CSR_MTX *mtx) {
         mtx->rows = 0;
         mtx->cols = 0;
         mtx->nnzs = 0;
-    }
-}
-
-/*
-* @brief: 验证CSR格式是否正确转换自COO格式
-* @author: Haoyu Wang
-* @date: 2025-10-23
-*/
-int validate_csr_from_coo(const CSR_MTX *csr, const COO_MTX *coo) {
-    if (csr == NULL || coo == NULL) {
-        printf("错误：CSR或COO矩阵指针为空\n");
-        return 0;
-    }
-    
-    if (csr->rows != coo->rows || csr->cols != coo->cols || csr->nnzs != coo->nnzs) {
-        printf("错误：CSR和COO矩阵维度不匹配\n");
-        printf("CSR: %u x %u, %u 个非零元素\n", csr->rows, csr->cols, csr->nnzs);
-        printf("COO: %u x %u, %u 个非零元素\n", coo->rows, coo->cols, coo->nnzs);
-        return 0;
-    }
-    
-    printf("开始验证CSR格式转换的正确性...\n");
-    printf("矩阵大小: %u x %u, 非零元素: %u\n", csr->rows, csr->cols, csr->nnzs);
-    
-    // 使用更高效的验证方法：检查CSR的row_ptr是否正确
-    int validation_errors = 0;
-    
-    // 1. 验证row_ptr数组的正确性
-    printf("验证row_ptr数组...\n");
-    if (csr->row_ptr[0] != 0) {
-        printf("错误：row_ptr[0] 应该为0，实际为 %u\n", csr->row_ptr[0]);
-        validation_errors++;
-    }
-    
-    if (csr->row_ptr[csr->rows] != csr->nnzs) {
-        printf("错误：row_ptr[%u] 应该为 %u，实际为 %u\n", 
-               csr->rows, csr->nnzs, csr->row_ptr[csr->rows]);
-        validation_errors++;
-    }
-    
-    // 检查row_ptr是否单调递增
-    for (vint i = 0; i < csr->rows; i++) {
-        if (csr->row_ptr[i] > csr->row_ptr[i + 1]) {
-            printf("错误：row_ptr[%u] = %u > row_ptr[%u] = %u\n", 
-                   i, csr->row_ptr[i], i + 1, csr->row_ptr[i + 1]);
-            validation_errors++;
-        }
-    }
-    
-    // 2. 验证每行的列索引是否在有效范围内
-    printf("验证列索引范围...\n");
-    for (vint row = 0; row < csr->rows; row++) {
-        for (vint idx = csr->row_ptr[row]; idx < csr->row_ptr[row + 1]; idx++) {
-            if (csr->col_idx[idx] >= csr->cols) {
-                printf("错误：行 %u 的列索引 %u 超出范围 [0, %u)\n", 
-                       row, csr->col_idx[idx], csr->cols);
-                validation_errors++;
-            }
-        }
-    }
-    
-    // 3. 抽样验证：只验证前1000个元素（对于大矩阵）
-    printf("抽样验证元素匹配...\n");
-    vint sample_size = (csr->nnzs > 1000) ? 1000 : csr->nnzs;
-    vint step = csr->nnzs / sample_size;
-    int sample_errors = 0;
-    
-    for (vint i = 0; i < sample_size; i++) {
-        vint csr_idx = i * step;
-        if (csr_idx >= csr->nnzs) break;
-        
-        // 找到CSR元素对应的行列
-        vint row = 0;
-        while (row < csr->rows && csr->row_ptr[row + 1] <= csr_idx) {
-            row++;
-        }
-        vint col = csr->col_idx[csr_idx];
-        MAT_VAL_TYPE val = csr->values[csr_idx];
-        
-        // 在COO中查找对应元素
-        int found = 0;
-        for (vint coo_idx = 0; coo_idx < coo->nnzs; coo_idx++) {
-            if (coo->row_idx[coo_idx] == row && coo->col_idx[coo_idx] == col) {
-                if (coo->values[coo_idx] == val) {
-                    found = 1;
-                    break;
-                } else {
-                    printf("错误：位置(%u, %u)的值不匹配 - CSR: %f, COO: %f\n", 
-                           row, col, val, coo->values[coo_idx]);
-                    sample_errors++;
-                    found = 1;
-                    break;
-                }
-            }
-        }
-        
-        if (!found) {
-            printf("错误：CSR中的元素(%u, %u) = %f 在COO中未找到\n", row, col, val);
-            sample_errors++;
-        }
-    }
-    
-    validation_errors += sample_errors;
-    
-    if (validation_errors == 0) {
-        printf("验证成功：CSR格式转换正确！\n");
-        printf("抽样验证了 %u 个元素，全部匹配\n", sample_size);
-        return 1;
-    } else {
-        printf("验证失败：发现 %d 个错误\n", validation_errors);
-        if (sample_errors > 0) {
-            printf("其中抽样验证发现 %d 个错误\n", sample_errors);
-        }
-        return 0;
     }
 }
 

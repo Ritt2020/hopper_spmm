@@ -81,6 +81,27 @@ DEVICE void mbarrier_expect_tx(u64 &barrier, u32 bytes) {
         "r"(bytes)
     );
 }
+// 1D TMA
+DEVICE void tma_cp_async_bulk_1d(
+    MAT_VAL_TYPE* smem_dst,
+    MAT_VAL_TYPE* src,
+    u32 size,
+    u64 &mbarrier
+){
+    u32 mbar_addr = cast_smem_ptr_to_uint(&mbarrier);
+    u32 smem_addr = cast_smem_ptr_to_uint(smem_dst);
+    u32 src_addr = cast_smem_ptr_to_uint(src);
+    // 使用 cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes
+    asm volatile(
+        "cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes"
+        " [%0], [%1], %2, [%3];"
+        :: "r"(smem_addr),
+           "r"(src_addr),
+           "r"(size),
+           "r"(mbar_addr)
+        : "memory"
+    );
+}
 // 2D TMA
 DEVICE void tma_cp_async_bulk_2d_shared_global_tile_mbarrier_bytes(
     MAT_VAL_TYPE* smem_dst,

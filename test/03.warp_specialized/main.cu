@@ -94,7 +94,8 @@ __global__ __launch_bounds__(NUM_THREADS) void ws_kernel(
             convert_fp32_to_tf32_shared(reinterpret_cast<uint32_t const*>(&smem.B[stage * TILE_K * TILE_N]), TILE_K * TILE_N);
             // wgmma
             fence_proxy_async_shared();
-
+            // 启动wgmma
+            wgmma_tf32_m64n8k8_no_trans_ss(&smem.A[stage * TILE_M * TILE_K], &smem.B[stage * TILE_K * TILE_N], C);
             wgmma_commit_group();
             wgmma_wait_group();
             // arrive at consumer barrier

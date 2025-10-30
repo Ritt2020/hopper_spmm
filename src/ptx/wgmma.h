@@ -8,6 +8,10 @@
 #include "../common.h"
 #include "ptx_utils.h"
 
+DEVICE u32 encode(u32 x){
+    return (x & 0x3FFFF) >> 4;
+}
+
 // 创建 wgmma 描述符，没有 swizzle
 DEVICE u64 create_wgmma_descriptor_no_swizzle(MAT_VAL_TYPE *ptr, u32 lbo, u32 sbo){
     uint64_t desc = 0;
@@ -28,7 +32,7 @@ DEVICE void wgmma_commit_group() {
 DEVICE void wgmma_wait_group() {
     asm volatile("wgmma.wait_group.sync.aligned 0;");
 }
-
+#ifdef USE_TF32
 /*
 * @brief: wgmma tf32 m64n8k8 函数， A 和 B 在 shared memory， SS 模式
 * @param: d_A: A 矩阵的指针， float 类型
@@ -52,3 +56,4 @@ DEVICE void wgmma_tf32_m64n8k8_no_trans_ss(float *d_A, float *d_B, float *d_C){
                 :"l"(desc_a), "l"(desc_b)
             );
 }
+#endif

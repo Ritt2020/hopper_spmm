@@ -67,6 +67,24 @@ struct BTCF_MTX {
 };
 
 /*
+* @brief: BTCF 矩阵结构体，不压缩
+* @author: Haoyu Wang
+* @date: 2025-10-23
+*/
+struct BTCF_MTX_NO_BITMAP {
+    vint rows;
+    vint cols;
+    vint nnzs;
+    vint total_row_windows; // 全部行窗口数
+    vint eff_row_windows; // 有效行窗口数（包含了非零元素的）
+    std::vector<MAT_PTR_TYPE> rowOffset; // 每组开始第一个块的偏移
+    std::vector<MAT_IDX_TYPE> tcA2B; // 每个块内每一列的下标
+    std::vector<MAT_VAL_TYPE> data; // 每个块内数据，只包含非零元素。通过nnzOffset进行索引
+    std::vector<MAT_IDX_TYPE> rowIdx; // 每行的原始行位置
+};
+
+
+/*
 * @brief: GBTCF 矩阵结构体
 * @author: Haoyu Wang
 * @date: 2025-10-23
@@ -85,4 +103,5 @@ struct GBTCF_MTX {
     std::vector<MAT_VAL_TYPE> data; // 每个块内数据，只包含非零元素。通过nnzOffset进行索引
     std::vector<MAT_IDX_TYPE> rowIdx; // 每组行索引
     std::vector<ATOMIC_TYPE> atomic; // 每组是否是原子操作
+    
 };

@@ -19,7 +19,7 @@
 * @author: Haoyu Wang
 * @date: 2025-10-23
 */
-void CSR2BTCF(CSR_MTX &csr, BTCF_MTX &btcf){
+void CSR2BTCF(const CSR_MTX &csr, BTCF_MTX &btcf){
     // 初始化btcf
     btcf.rows = csr.rows;
     btcf.cols = csr.cols;
@@ -57,7 +57,13 @@ void CSR2BTCF(CSR_MTX &csr, BTCF_MTX &btcf){
         vint window_tc_num = unique_edges.size() / COL_WINDOW;
         btcf.rowOffset.push_back(btcf.rowOffset.back() + window_tc_num);
         btcf.nnzOffset.resize(btcf.nnzOffset.size() + window_tc_num, 0);
-        btcf.tcBit.resize(btcf.tcBit.size() + window_tc_num, 0);
+        vint tcBit_size;
+        #if defined(USE_BF16) || defined(USE_FP16)
+        tcBit_size = window_tc_num * 2;
+        #else
+        tcBit_size = window_tc_num;
+        #endif
+        btcf.tcBit.resize(btcf.tcBit.size() + tcBit_size, 0);
         btcf.rowIdx.push_back(iter);
         // 填充nnzOffset 和 tcBit 和 data
         #ifdef SPARSE_A_TRANSPOSE
@@ -87,10 +93,19 @@ void CSR2BTCF(CSR_MTX &csr, BTCF_MTX &btcf){
                 bit_index = (r % ROW_WINDOW) * COL_WINDOW + (c_idx % COL_WINDOW);
                 #endif
                 
+                #if defined(USE_BF16) || defined(USE_FP16)
+                if(bit_index < 64) {
+                    btcf.tcBit[offset_index] |= (1ULL << bit_index);
+                } else if(bit_index < 128) {
+                    btcf.tcBit[offset_index + 1] |= (1ULL << (bit_index - 64));
+                }
+                #else
                 // 确保位图索引在64位范围内
                 if(bit_index < 64) {
                     btcf.tcBit[offset_index] |= (1ULL << bit_index);
                 }
+                #endif
+                
                 
                 #ifdef SPARSE_A_TRANSPOSE
                 // 列优先存储：按列存储数据
@@ -121,6 +136,91 @@ void CSR2BTCF(CSR_MTX &csr, BTCF_MTX &btcf){
     btcf.nnzOffset.insert(btcf.nnzOffset.begin(), 0);
     std::partial_sum(btcf.nnzOffset.begin(), btcf.nnzOffset.end(), btcf.nnzOffset.begin());
     printf("CSR到BTCF转换完成！有效行窗口数: %d\n", eff_row_windows);
+}
+
+/*
+* @brief: CSR到BTCF_NO_BITMAP转换（完整存储，不使用位图压缩）
+* @author: Haoyu Wang
+* @date: 2025-10-23
+*/
+void CSR2BTCFNOBITMAP(const CSR_MTX &csr, BTCF_MTX_NO_BITMAP &btcf){
+    // 初始化btcf
+    btcf.rows = csr.rows;
+    btcf.cols = csr.cols;
+    btcf.nnzs = csr.nnzs;
+    btcf.total_row_windows = (btcf.rows + ROW_WINDOW - 1) / ROW_WINDOW;
+    btcf.rowOffset.push_back(0);
+    vint eff_row_windows = 0;
+    printf("开始CSR到BTCF_NO_BITMAP转换，总行数: %d, 总行窗口数: %d\n", csr.rows, btcf.total_row_windows);
+    
+    for(vint iter = 0; iter < csr.rows; iter += ROW_WINDOW){
+        vint row_start = iter;
+        vint row_end = min(row_start + ROW_WINDOW, csr.rows);
+        vint block_start = csr.row_ptr[row_start];
+        vint block_end = csr.row_ptr[row_end];
+        vint nnzs_total = block_end - block_start;
+        if(nnzs_total == 0) continue;
+        eff_row_windows++;
+        
+        // 对这个行窗口所有列索引去重排序
+        std::vector<MAT_IDX_TYPE> neighbor_window(csr.col_idx + block_start, csr.col_idx + block_end);
+        std::sort(neighbor_window.begin(), neighbor_window.end());
+        std::vector<MAT_IDX_TYPE> unique_edges;
+        std::unique_copy(neighbor_window.begin(), neighbor_window.end(), std::back_inserter(unique_edges));
+        
+        // 映射
+        std::unordered_map<MAT_IDX_TYPE, MAT_IDX_TYPE> clean_edges2col;
+        for(vint i = 0; i < unique_edges.size(); ++i){
+            clean_edges2col[unique_edges[i]] = i;
+        }
+        
+        // 填充tcA2B 注意填充不足COL_WINDOW的补足为IDX_MAX
+        vint remainder = unique_edges.size() % COL_WINDOW;
+        if(remainder != 0){
+            unique_edges.insert(unique_edges.end(), COL_WINDOW - remainder, IDX_MAX);
+        }
+        
+        // 复制到tcA2B
+        btcf.tcA2B.insert(btcf.tcA2B.end(), unique_edges.begin(), unique_edges.end());
+        vint window_tc_num = unique_edges.size() / COL_WINDOW;
+        btcf.rowOffset.push_back(btcf.rowOffset.back() + window_tc_num);
+        btcf.rowIdx.push_back(iter);
+        
+        // 填充完整数据（不使用位图压缩，每个块大小为 ROW_WINDOW × COL_WINDOW）
+        // 预分配当前窗口所有块的空间，初始化为0
+        vint window_data_size = window_tc_num * ROW_WINDOW * COL_WINDOW;
+        vint window_data_start = btcf.data.size(); // 当前窗口数据在 btcf.data 中的起始位置
+        btcf.data.resize(btcf.data.size() + window_data_size, static_cast<MAT_VAL_TYPE>(0.0f));
+        
+        // 直接写入对应位置
+        for(vint r = iter; r < std::min(iter + ROW_WINDOW, csr.rows); ++r){
+            for(vint nnz_id = csr.row_ptr[r]; nnz_id < csr.row_ptr[r + 1]; ++nnz_id){
+                vint col_in_edges = clean_edges2col[csr.col_idx[nnz_id]];
+                vint tc_id = col_in_edges / COL_WINDOW; // 该元素属于哪个块
+                vint local_col = col_in_edges % COL_WINDOW; // 块内列索引
+                vint local_row = r % ROW_WINDOW; // 块内行索引
+                
+                // 计算该元素在 btcf.data 中的位置
+                vint block_start = window_data_start + tc_id * ROW_WINDOW * COL_WINDOW; // 块起始位置
+                vint offset_in_block;
+                
+                #ifdef SPARSE_A_TRANSPOSE
+                // 列优先存储：offset = local_col × ROW_WINDOW + local_row
+                offset_in_block = local_col * ROW_WINDOW + local_row;
+                #else
+                // 行优先存储：offset = local_row × COL_WINDOW + local_col
+                offset_in_block = local_row * COL_WINDOW + local_col;
+                #endif
+                
+                btcf.data[block_start + offset_in_block] = csr.values[nnz_id];
+            }
+        }
+    }
+    
+    btcf.eff_row_windows = eff_row_windows;
+    printf("CSR到BTCF_NO_BITMAP转换完成！有效行窗口数: %d\n", eff_row_windows);
+    printf("总块数: %d, 总数据量: %lu (每块 %d × %d = %d 个元素)\n", 
+           btcf.rowOffset.back(), btcf.data.size(), ROW_WINDOW, COL_WINDOW, ROW_WINDOW * COL_WINDOW);
 }
 
 /*
@@ -284,16 +384,16 @@ bool validateBTCF2GBTCFConversion(const BTCF_MTX &btcf, const GBTCF_MTX &gbtcf) 
     
     for (vint i = 0; i < btcf.tcBit.size(); ++i) {
         if (btcf.tcBit[i] != gbtcf.tcBit[i]) {
-            printf("错误：tcBit[%d]不匹配！BTCF=%u, GBTCF=%u\n", 
-                   i, btcf.tcBit[i], gbtcf.tcBit[i]);
+            printf("错误：tcBit[%d]不匹配！\n", 
+                   i);
             return false;
         }
     }
     
     for (vint i = 0; i < btcf.data.size(); ++i) {
         if (btcf.data[i] != gbtcf.data[i]) {
-            printf("错误：data[%d]不匹配！BTCF=%f, GBTCF=%f\n", 
-                   i, btcf.data[i], gbtcf.data[i]);
+            printf("错误：data[%d]不匹配！\n", 
+                   i);
             return false;
         }
     }
