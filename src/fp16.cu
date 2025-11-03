@@ -34,10 +34,13 @@ struct SharedStorage {
 };
 
 __global__ __launch_bounds__(NUM_THREADS) void fp16_spmm_kernel(
+    const __grid_constant__ CUtensorMap tensorMapA,
     MAT_PTR_TYPE *d_rowOffset,
     MAT_IDX_TYPE *d_tcA2B,
     MAT_VAL_TYPE *d_data,
     MAT_IDX_TYPE *d_rowIdx,
+    u32 eff_row_windows,
+    u32 feature_dim,
     MAT_VAL_TYPE *d_dense_b,
     MAT_VAL_TYPE *d_dense_c
 ){
@@ -51,16 +54,18 @@ __global__ __launch_bounds__(NUM_THREADS) void fp16_spmm_kernel(
     int wg_tid = tid % WARPGROUP_SIZE;
     bool is_producer = warp_id < PRODUCER_WARPS;
     // barriers
-    __shared__ __align__(8) uint64_t pro_bar[STAGES]; // 生产者 barrier
-    __shared__ __align__(8) uint64_t con_bar[STAGES]; // 消费者 barrier
-    __shared__ __align__(8) uint64_t row_bar; // 行窗口 barrier
+    __shared__ __align__(8) u64 pro_bar[STAGES]; // 生产者 barrier
+    __shared__ __align__(8) u64 con_bar[STAGES]; // 消费者 barrier
+    __shared__ __align__(8) u64 row_bar; // 行窗口 barrier
+    __shared__ __align__(8) u64 pro; // 生产者 barrier
     // 初始化 barriers
     if(tid == 0){
         for(int i = 0; i < STAGES; i++){
             mbarrier_init(pro_bar[i], 1);
-            mbarrier_init(con_bar[i], WARPGROUPS-1);
-            mbarrier_init(row_bar, WARPGROUPS-1);
+            mbarrier_init(con_bar[i], WARPGROUPS-1);  
         }
+        mbarrier_init(row_bar, WARPGROUPS-1);
+        mbarrier_init(pro, 1);
     }
     fence_proxy_async_shared();
     __syncthreads();
@@ -77,26 +82,35 @@ __global__ __launch_bounds__(NUM_THREADS) void fp16_spmm_kernel(
         */ 
         int stage = 0;
         int phase = 0;
-        for(int row = blockIdx.x; row < btcf_a.eff_row_windows; row += gridDim.x){
-            int tile_num = btcf_a.rowOffset[row+1] - btcf_a.rowOffset[row];
+        int row_phase = 0;
+        for(int row = blockIdx.x; row < eff_row_windows; row += gridDim.x){
             // 等待行窗口开始
-            mbarrier_wait(row_bar, 0);
+            mbarrier_wait(row_bar, row_phase);
             // 内层循环：A块
-            for(auto tile = 0; tile < tile_num; tile++){
+            for(auto tile = d_rowOffset[row]; tile < d_rowOffset[row+1]; tile++){
                 // 等待消费者 barrier
-                mbarrier_wait(con_bar[stage], phase);
-                // 设置expect tx
-                mbarrier_expect_tx(pro_bar[stage], (WGMMA_M * WGMMA_K * (WARPGROUPS-1) + WGMMA_K * WGMMA_N) * sizeof(float));
+                if(wg_tid == 0){
+                    // 设置expect tx
+                    mbarrier_wait(con_bar[stage], phase);
+                    mbarrier_expect_tx(pro_bar[stage], (WGMMA_M * WGMMA_K * (WARPGROUPS-1) + WGMMA_K * WGMMA_N) * sizeof(MAT_VAL_TYPE));
+                    mbarrier_arrive(pro, 1);
+                }
+                mbarrier_wait(pro, 0);
                 // load A and B
-                tma_cp_async_bulk_1d(&smem.A[stage * WGMMA_N * WGMMA_K], d_data + (btcf_a.rowOffset[row] + tile) * WGMMA_N * WGMMA_K, (WGMMA_N * WGMMA_K) * sizeof(__half), pro_bar[stage]);
-                // 这里其实是不对的，需要2D load 但是不知道转置之后的矩阵布局
+                if(wg_tid == 0){
+                    tma_cp_async_bulk_4d_shared_global_tile_mbarrier_bytes(&smem.A[stage * WGMMA_N * WGMMA_K], &tensorMapA, 0, 0, 0, tile, pro_bar[stage]);
+                }
+                int r = wg_tid >> 4;
+                int c = wg_tid & 15;
+                tma_cp_async_bulk_1d(&smem.B[stage * WGMMA_K * WGMMA_M + WGMMA_K * 8 * c + r * 8], d_dense_b + r * feature_dim + c * 8, 8 * sizeof(MAT_VAL_TYPE), pro_bar[stage]);
+                tma_cp_async_bulk_1d(&smem.B[WGMMA_K * WGMMA_M * STAGES + stage * WGMMA_K * WGMMA_M + WGMMA_K * 8 * c + r * 8], d_dense_b + r * feature_dim + c * 8 + 64, 8 * sizeof(MAT_VAL_TYPE), pro_bar[stage]);
                 stage++;
                 if(stage == STAGES){
                     stage = 0;
                     phase ^= 1;
                 }
             }
-
+            row_phase ^= 1;
         }
     }
     else{
@@ -112,7 +126,7 @@ __global__ __launch_bounds__(NUM_THREADS) void fp16_spmm_kernel(
             4. 重复上述步骤，直到行窗口结束，结束后到达行窗口 barrier
         */ 
         int con_wgid = wgid - 1; // 消费者组ID
-        int stage = con_wgid;
+        int stage = 0;
         int phase = 0;
         float C[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         if(wg_tid == 0){
@@ -121,19 +135,16 @@ __global__ __launch_bounds__(NUM_THREADS) void fp16_spmm_kernel(
                 mbarrier_arrive(con_bar[i], 1);
             }
         }
-        for(int row = blockIdx.x; row < btcf_a.eff_row_windows; row += gridDim.x){
-            // 到达行窗口 
-            mbarrier_arrive(row_bar, 1);
+        for(int row = blockIdx.x; row < eff_row_windows; row += gridDim.x){
             // 计算行
-            int tile_num = btcf_a.rowOffset[row+1] - btcf_a.rowOffset[row];
-            for(auto tile = 0; tile < tile_num; tile++){
+            for(auto tile = d_rowOffset[row]; tile < d_rowOffset[row+1]; tile++){
                 // 等待生产者 barrier
                 mbarrier_wait(pro_bar[stage], phase);
                 // wgmma操作
                 wgmma_fence();
                 fence_proxy_async_shared();
                 // 启动wgmma                
-
+                wgmma_fp16_m64n8k16_ss(&smem.B[stage * WGMMA_K * WGMMA_M + (con_wgid) * STAGES * WGMMA_K * WGMMA_M], &smem.A[stage * WGMMA_N * WGMMA_K], C);
                 wgmma_commit_group();
                 wgmma_wait_group();
                 // arrive at consumer barrier
@@ -141,15 +152,70 @@ __global__ __launch_bounds__(NUM_THREADS) void fp16_spmm_kernel(
                     mbarrier_arrive(con_bar[stage], 1);
                 }
                 stage ++;
-                if(stage >= STAGES){
-                    stage -= STAGES;
+                if(stage == STAGES){
+                    stage = 0;
                     phase ^= 1;
                 }
             }
+            if(wg_tid == 0){
+                mbarrier_arrive(row_bar, 1);
+            }
+            uint32_t row_group = (threadIdx.x >> 5) << 4;
+            uint32_t row_in_group = (threadIdx.x & 31) >> 2;
+            uint32_t col_group = threadIdx.x & 3;
+            //write back C
+            d_dense_c[(d_rowIdx[row] + (col_group << 1)) * feature_dim + (row_group + row_in_group)] = C[0];
+            d_dense_c[(d_rowIdx[row] + (col_group << 1) + 1) * feature_dim + (row_group + row_in_group)] = C[1];
+            d_dense_c[(d_rowIdx[row] + (col_group << 1)) * feature_dim + (row_group + row_in_group + 8)] = C[2];
+            d_dense_c[(d_rowIdx[row] + (col_group << 1) + 1) * feature_dim + (row_group + row_in_group + 8)] = C[3];
             
         }
     }
 
+}
+
+CUtensorMap create_tma_desc_A(MAT_VAL_TYPE *d_A, u32 total_tiles){
+    // 创建 TensorMap
+    alignas(64) CUtensorMap tensorMap;
+    // Tensor Map 参数
+    CUtensorMapDataType dataType = CU_TENSOR_MAP_DATA_TYPE_FLOAT16;
+    uint32_t tensorRank = 4;  // 4D tensor
+    
+    uint64_t globalDim[4] = { 8ULL, 8ULL, 2ULL, (u64)total_tiles };
+    
+    uint64_t globalStride[3] = { 16 * sizeof(MAT_VAL_TYPE), 8 * sizeof(MAT_VAL_TYPE), 128 * sizeof(MAT_VAL_TYPE) };
+    
+    uint32_t boxDim[4] = { 8, 8, 2, 1 };
+    uint32_t elementStride[4] = { 1, 1, 1, 1 };
+    
+    // TMA 填充模式
+    CUtensorMapInterleave interleave = CU_TENSOR_MAP_INTERLEAVE_NONE;
+    CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_NONE;
+    CUtensorMapL2promotion l2Promotion = CU_TENSOR_MAP_L2_PROMOTION_NONE;
+    CUtensorMapFloatOOBfill oobFill = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+    
+    // 创建 tiled tensor map
+    CUresult res = cuTensorMapEncodeTiled(
+        &tensorMap,
+        dataType,
+        tensorRank,
+        (void*)d_A,           // 全局内存基地址
+        globalDim,
+        globalStride,
+        boxDim,
+        elementStride,
+        interleave,
+        swizzle,
+        l2Promotion,
+        oobFill
+    );
+    
+    if (res != CUDA_SUCCESS) {
+        const char* errStr;
+        cuGetErrorString(res, &errStr);
+        fprintf(stderr, "cuTensorMapEncodeTiled 失败: %s\n", errStr);
+    }
+    return tensorMap;
 }
 
 PERF_RESULT fp16_spmm(BTCF_MTX_NO_BITMAP &btcf_a, DENSE_MTX &dense_b, DENSE_MTX &dense_c){
@@ -182,9 +248,12 @@ PERF_RESULT fp16_spmm(BTCF_MTX_NO_BITMAP &btcf_a, DENSE_MTX &dense_b, DENSE_MTX 
     CHECK_CUDA(cudaMemcpy(d_dense_b, dense_b.values, dense_b.rows * dense_b.cols * sizeof(MAT_VAL_TYPE), cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_dense_c, dense_c.values, dense_c.rows * dense_c.cols * sizeof(MAT_VAL_TYPE), cudaMemcpyHostToDevice));
     
+    // 创建 tensor map
+    CUtensorMap tensorMapA = create_tma_desc_A(d_data, btcf_a.total_tiles);
+    
     // 开始warm up
     for(int i = 0; i < WARMUP_RUNS; i++){
-        fp16_spmm_kernel<<<NUM_SMS, NUM_THREADS, sizeof(SharedStorage)>>>(d_rowOffset, d_tcA2B, d_data, d_rowIdx, d_dense_b, d_dense_c);
+        fp16_spmm_kernel<<<NUM_SMS, NUM_THREADS, sizeof(SharedStorage)>>>(tensorMapA, d_rowOffset, d_tcA2B, d_data, d_rowIdx, btcf_a.eff_row_windows, dense_b.cols, d_dense_b, d_dense_c);
     }
     // 计时，正式运行
     cudaEvent_t start, stop;
@@ -192,7 +261,7 @@ PERF_RESULT fp16_spmm(BTCF_MTX_NO_BITMAP &btcf_a, DENSE_MTX &dense_b, DENSE_MTX 
     CHECK_CUDA(cudaEventCreate(&stop));
     CHECK_CUDA(cudaEventRecord(start, 0));
     for(int i = 0; i < RUNS; i++){
-        fp16_spmm_kernel<<<NUM_SMS, NUM_THREADS, sizeof(SharedStorage)>>>(d_rowOffset, d_tcA2B, d_data, d_rowIdx, d_dense_b, d_dense_c);
+        fp16_spmm_kernel<<<NUM_SMS, NUM_THREADS, sizeof(SharedStorage)>>>(tensorMapA, d_rowOffset, d_tcA2B, d_data, d_rowIdx, btcf_a.eff_row_windows, dense_b.cols, d_dense_b, d_dense_c);
     }
     CHECK_CUDA(cudaEventRecord(stop, 0));
     CHECK_CUDA(cudaEventSynchronize(stop));

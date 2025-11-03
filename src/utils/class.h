@@ -81,6 +81,7 @@ struct BTCF_MTX_NO_BITMAP {
     std::vector<MAT_IDX_TYPE> tcA2B; // 每个块内每一列的下标
     std::vector<MAT_VAL_TYPE> data; // 每个块内数据，只包含非零元素。通过nnzOffset进行索引
     std::vector<MAT_IDX_TYPE> rowIdx; // 每行的原始行位置
+    u32 total_tiles; // 总块数
 };
 
 

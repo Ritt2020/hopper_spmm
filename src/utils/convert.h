@@ -218,6 +218,7 @@ void CSR2BTCFNOBITMAP(const CSR_MTX &csr, BTCF_MTX_NO_BITMAP &btcf){
     }
     
     btcf.eff_row_windows = eff_row_windows;
+    btcf.total_tiles = btcf.rowOffset.back();
     printf("CSR到BTCF_NO_BITMAP转换完成！有效行窗口数: %d\n", eff_row_windows);
     printf("总块数: %d, 总数据量: %lu (每块 %d × %d = %d 个元素)\n", 
            btcf.rowOffset.back(), btcf.data.size(), ROW_WINDOW, COL_WINDOW, ROW_WINDOW * COL_WINDOW);

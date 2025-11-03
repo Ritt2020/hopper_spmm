@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 
 #define DEVICE __device__ __forceinline__
 #define TILE_M 64
@@ -116,8 +117,64 @@ namespace ptx {
             : "memory"
         );
     }
+    DEVICE void tma_cp_async_bulk_3d_shared_global_tile_mbarrier_bytes(
+        fp16* smem_dst,
+        void const* const src_tma_desc,
+        int32_t tile_coord_i,
+        int32_t tile_coord_j,
+        int32_t tile_coord_k,
+        uint64_t &mbarrier)
+    {
+        uint64_t tma_ptr = reinterpret_cast<uint64_t>(src_tma_desc);
+        uint32_t smem_addr = cast_smem_ptr_to_uint(smem_dst);
+        uint32_t mbar_addr = cast_smem_ptr_to_uint(&mbarrier);
+        asm volatile(
+            "cp.async.bulk.tensor.3d.shared::cluster.global.tile.mbarrier::complete_tx::bytes"
+            " [%0], [%1, {%2, %3, %4}], [%5];"
+            :: "r"(smem_addr),
+               "l"(tma_ptr),
+               "r"(tile_coord_i),
+               "r"(tile_coord_j),
+               "r"(tile_coord_k),
+               "r"(mbar_addr)
+            : "memory"
+        );
+    }
+    // copy 4D TMA
+    DEVICE void tma_cp_async_bulk_4d_shared_global_tile_mbarrier_bytes(
+        fp16* smem_dst,
+        void const* const src_tma_desc,
+        int32_t tile_coord_i,
+        int32_t tile_coord_j,
+        int32_t tile_coord_k,
+        int32_t tile_coord_l,
+        uint64_t &mbarrier)
+    {
+        uint64_t tma_ptr = reinterpret_cast<uint64_t>(src_tma_desc);
+        uint32_t smem_addr = cast_smem_ptr_to_uint(smem_dst);
+        uint32_t mbar_addr = cast_smem_ptr_to_uint(&mbarrier);
+        asm volatile(
+            "cp.async.bulk.tensor.4d.shared::cluster.global.tile.mbarrier::complete_tx::bytes"
+            " [%0], [%1, {%2, %3, %4, %5}], [%6];"
+            :: "r"(smem_addr),
+               "l"(tma_ptr),
+               "r"(tile_coord_i),
+               "r"(tile_coord_j),
+               "r"(tile_coord_k),
+               "r"(tile_coord_l),
+               "r"(mbar_addr)
+            : "memory"
+        );
+    }
     // 创建 wgmma 描述符，没有 swizzle
     DEVICE uint64_t create_wgmma_descriptor_no_swizzle(float *ptr, uint32_t lbo, uint32_t sbo){
+        uint64_t desc = 0;
+        desc |= (uint64_t)encode(lbo) << 16;
+        desc |= (uint64_t)encode(sbo) << 32;
+        desc |= (uint64_t)encode(__cvta_generic_to_shared(ptr));
+        return desc;
+    }
+    DEVICE uint64_t create_wgmma_descriptor_no_swizzle(fp16 *ptr, uint32_t lbo, uint32_t sbo){
         uint64_t desc = 0;
         desc |= (uint64_t)encode(lbo) << 16;
         desc |= (uint64_t)encode(sbo) << 32;
@@ -147,17 +204,29 @@ namespace ptx {
                 :: "r"(A[i]));
         }
     }
-    // wgmma tf32 m64n8k8 函数， A 和 B 在 shared memory
-    DEVICE void wgmma_tf32_m64n8k8_no_trans_ss(float *d_A, float *d_B, float *d_C){
-        uint32_t const* A   = reinterpret_cast<uint32_t const*>(d_A);
-        uint32_t const* B   = reinterpret_cast<uint32_t const*>(d_B);
-        convert_fp32_to_tf32_shared(A, 64 * 8);
-        convert_fp32_to_tf32_shared(B, 8 * 8);
-        uint64_t desc_a = create_wgmma_descriptor_no_swizzle(d_A, 256 * sizeof(float), 32 * sizeof(float));
-        uint64_t desc_b = create_wgmma_descriptor_no_swizzle(d_B, 32 * sizeof(float), 32 * sizeof(float));
-        asm volatile("wgmma.mma_async.sync.aligned.m64n8k8.f32.tf32.tf32"
+    // // wgmma tf32 m64n8k8 函数， A 和 B 在 shared memory
+    // DEVICE void wgmma_tf32_m64n8k8_no_trans_ss(float *d_A, float *d_B, float *d_C){
+    //     uint32_t const* A   = reinterpret_cast<uint32_t const*>(d_A);
+    //     uint32_t const* B   = reinterpret_cast<uint32_t const*>(d_B);
+    //     convert_fp32_to_tf32_shared(A, 64 * 8);
+    //     convert_fp32_to_tf32_shared(B, 8 * 8);
+    //     uint64_t desc_a = create_wgmma_descriptor_no_swizzle(d_A, 256 * sizeof(float), 32 * sizeof(float));
+    //     uint64_t desc_b = create_wgmma_descriptor_no_swizzle(d_B, 32 * sizeof(float), 32 * sizeof(float));
+    //     asm volatile("wgmma.mma_async.sync.aligned.m64n8k8.f32.tf32.tf32"
+    //                 "{%0, %1, %2, %3},"
+    //                 "%4, %5, 1, 1, 1;\n"
+    //                 :"+f"(d_C[0]), "+f"(d_C[1]), "+f"(d_C[2]), "+f"(d_C[3])
+    //                 :"l"(desc_a), "l"(desc_b)
+    //             );
+        
+    // }
+    // wgmma fp16 m64n8k16 函数， A 和 B 在 shared memory
+    DEVICE void wgmma_fp16_m64n8k16_no_trans_ss(fp16 *d_A, fp16 *d_B, float *d_C){
+        uint64_t desc_a = create_wgmma_descriptor_no_swizzle(d_A, 64 * sizeof(fp16), 128 * sizeof(fp16));
+        uint64_t desc_b = create_wgmma_descriptor_no_swizzle(d_B, 64 * sizeof(fp16), 128 * sizeof(fp16));
+        asm volatile("wgmma.mma_async.sync.aligned.m64n8k16.f32.f16.f16"
                     "{%0, %1, %2, %3},"
-                    "%4, %5, 1, 1, 1;\n"
+                    "%4, %5, 1, 1, 1, 0, 0;\n"
                     :"+f"(d_C[0]), "+f"(d_C[1]), "+f"(d_C[2]), "+f"(d_C[3])
                     :"l"(desc_a), "l"(desc_b)
                 );
@@ -172,8 +241,8 @@ __global__ void tma_wgmma_kernel(
     float* d_C
 ) {
     __shared__ uint64_t mbarrier;
-    __shared__ alignas(128) float sA[TILE_M * TILE_K];
-    __shared__ alignas(128) float sB[TILE_N * TILE_K];
+    __shared__ alignas(128) fp16 sA[TILE_M * TILE_K];
+    __shared__ alignas(128) fp16 sB[TILE_N * TILE_K];
     float C[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     uint32_t row_group = (threadIdx.x >> 5) << 4;
     uint32_t row_in_group = (threadIdx.x & 31) >> 2;
@@ -186,26 +255,22 @@ __global__ void tma_wgmma_kernel(
         TMA 搬运 A 和 B
     */
     if (threadIdx.x == 0) {
-        uint32_t expected_bytes_A = TILE_M * TILE_K * sizeof(float);
-        uint32_t expected_bytes_B = TILE_N * TILE_K * sizeof(float);
+        uint32_t expected_bytes_A = TILE_M * TILE_K * sizeof(fp16);
+        uint32_t expected_bytes_B = TILE_N * TILE_K * sizeof(fp16);
         // ptx::mbarrier_expect_tx(mbarrier, expected_bytes_A);
         ptx::mbarrier_expect_tx(mbarrier, expected_bytes_A + expected_bytes_B);
-        ptx::tma_cp_async_bulk_3d_shared_global_tile_mbarrier_bytes(sA, &tensorMapA, 0, 0, 0, mbarrier);
+        ptx::tma_cp_async_bulk_4d_shared_global_tile_mbarrier_bytes(sA, &tensorMapA, 0, 0, 0, 0, mbarrier);
         ptx::tma_cp_async_bulk_3d_shared_global_tile_mbarrier_bytes(sB, &tensorMapB, 0, 0, 0, mbarrier);
     }
     // 等待完成
     ptx::mbarrier_arrive_and_wait(mbarrier);
     __syncthreads();
     // ptx::fence_proxy_async_shared();
-    // 转换 tf32
-    ptx::convert_fp32_to_tf32_shared(reinterpret_cast<uint32_t const*>(sA), TILE_M * TILE_K);
-    ptx::convert_fp32_to_tf32_shared(reinterpret_cast<uint32_t const*>(sB), TILE_N * TILE_K);
-    __syncthreads();
     // fence
     ptx::wgmma_fence();
     ptx::fence_proxy_async_shared();
     // compute
-    ptx::wgmma_tf32_m64n8k8_no_trans_ss(sA, sB, C);
+    ptx::wgmma_fp16_m64n8k16_no_trans_ss(sA, sB, C);
     // sync
     ptx::wgmma_commit_group();
     ptx::wgmma_wait_group();
@@ -249,25 +314,25 @@ bool test_result_cpu(float *d_C, fp16 *h_A, fp16 *h_B, int M, int N, int K, floa
     return is_correct;
 }
 
-CUtensorMap create_tma_desc_A(float *d_A){
+CUtensorMap create_tma_desc_A(fp16 *d_A){
     // 创建 TensorMap
     alignas(64) CUtensorMap tensorMap;
     // Tensor Map 参数
-    CUtensorMapDataType dataType = CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
-    uint32_t tensorRank = 3;  // 3D tensor
+    CUtensorMapDataType dataType = CU_TENSOR_MAP_DATA_TYPE_FLOAT16;
+    uint32_t tensorRank = 4;  // 4D tensor
     
-    uint64_t globalDim[3] = { 4ULL, 64ULL, 2ULL };
+    uint64_t globalDim[4] = { 8ULL, 8ULL, 2ULL, 8ULL };
     
-    uint64_t globalStride[2] = { 8 * sizeof(float), 4 * sizeof(float) };
+    uint64_t globalStride[3] = { 16 * sizeof(fp16), 8 * sizeof(fp16), 8 * 16 * sizeof(fp16) };
     
-    uint32_t boxDim[3] = { 4, 64, 2 };
-    uint32_t elementStride[3] = { 1, 1, 1 };
+    uint32_t boxDim[4] = { 8, 8, 2, 8 };
+    uint32_t elementStride[4] = { 1, 1, 1, 1 };
     
     // TMA 填充模式
     CUtensorMapInterleave interleave = CU_TENSOR_MAP_INTERLEAVE_NONE;
     CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_NONE;
     CUtensorMapL2promotion l2Promotion = CU_TENSOR_MAP_L2_PROMOTION_NONE;
-    CUtensorMapFloatOOBfill oobFill = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
+    CUtensorMapFloatOOBfill oobFill = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE; // 不填充
     
     // 创建 tiled tensor map
     CUresult res = cuTensorMapEncodeTiled(
@@ -293,18 +358,18 @@ CUtensorMap create_tma_desc_A(float *d_A){
     return tensorMap;
 }
 
-CUtensorMap create_tma_desc_B(float *d_B){
+CUtensorMap create_tma_desc_B(fp16 *d_B){
     // 创建 TensorMap
     alignas(64) CUtensorMap tensorMap;
     // Tensor Map 参数
-    CUtensorMapDataType dataType = CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
+    CUtensorMapDataType dataType = CU_TENSOR_MAP_DATA_TYPE_FLOAT16;
     uint32_t tensorRank = 3;  // 3D tensor
     
-    uint64_t globalDim[3] = { 4ULL, 8ULL, 2ULL };
+    uint64_t globalDim[3] = { 8ULL, 8ULL, 2ULL };
     
-    uint64_t globalStride[2] = { 8 * sizeof(float), 4 * sizeof(float) };
+    uint64_t globalStride[2] = { 16 * sizeof(fp16), 8 * sizeof(fp16) };
     
-    uint32_t boxDim[3] = { 4, 8, 2 };
+    uint32_t boxDim[3] = { 8, 8, 2 };
     uint32_t elementStride[3] = { 1, 1, 1 };
     
     // TMA 填充模式
@@ -346,7 +411,7 @@ int main() {
     // B 列主序
     fp16 *h_B = (fp16 *)malloc(TILE_K * TILE_N * sizeof(fp16));
     for(int i = 0; i < TILE_K * TILE_N; i++){
-        h_B[i] = __float2half(1.0f + i * 0.01f);
+        h_B[i] = __float2half(1.0f);
     }
 
     // 分配 device 端空间

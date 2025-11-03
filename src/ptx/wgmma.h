@@ -57,3 +57,16 @@ DEVICE void wgmma_tf32_m64n8k8_no_trans_ss(float *d_A, float *d_B, float *d_C){
             );
 }
 #endif
+#ifdef USE_FP16
+DEVICE void wgmma_fp16_m64n8k16_ss(MAT_VAL_TYPE *d_A, MAT_VAL_TYPE *d_B, float *d_C){
+    uint64_t desc_a = create_wgmma_descriptor_no_swizzle(d_A, 64 * sizeof(MAT_VAL_TYPE), 128 * sizeof(MAT_VAL_TYPE));
+    uint64_t desc_b = create_wgmma_descriptor_no_swizzle(d_B, 64 * sizeof(MAT_VAL_TYPE), 128 * sizeof(MAT_VAL_TYPE));
+    asm volatile("wgmma.mma_async.sync.aligned.m64n8k16.f32.f16.f16"
+                "{%0, %1, %2, %3},"
+                "%4, %5, 1, 1, 1, 1, 0;\n"
+                :"+f"(d_C[0]), "+f"(d_C[1]), "+f"(d_C[2]), "+f"(d_C[3])
+                :"l"(desc_a), "l"(desc_b)
+            );
+    
+}
+#endif
